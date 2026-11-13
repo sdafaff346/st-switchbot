@@ -112,6 +112,42 @@ function isGenerating() {
     return !!stop && getComputedStyle(stop).display !== 'none';
 }
 
+// Background Reply (ST-Background-Reply) marks the message a background reply will land in with
+// extra.bg_reply (on the message or one of its swipes). While such a marker is in the open chat,
+// copying or trimming the chat would leave the reply stranded, so switching waits for it.
+const BG_REPLY_MARK = 'bg_reply';
+
+function hasBgMarker(msg) {
+    if (msg?.extra?.[BG_REPLY_MARK]) return true;
+    return Array.isArray(msg?.swipe_info) && msg.swipe_info.some(info => info?.extra?.[BG_REPLY_MARK]);
+}
+
+function hasPendingBackgroundReply() {
+    try {
+        return (ctx().chat ?? []).some(hasBgMarker);
+    } catch {
+        return false;
+    }
+}
+
+/** Copies must never carry another chat's background-reply markers. */
+function stripBgMarkers(messages) {
+    for (const msg of messages) {
+        if (msg?.extra) delete msg.extra[BG_REPLY_MARK];
+        if (Array.isArray(msg?.swipe_info)) {
+            for (const info of msg.swipe_info) if (info?.extra) delete info.extra[BG_REPLY_MARK];
+        }
+    }
+    return messages;
+}
+
+/** '' when it is safe to copy, trim or leave the open chat. */
+function busyReason() {
+    if (isGenerating()) return t('err_busy');
+    if (hasPendingBackgroundReply()) return t('err_bg_reply');
+    return '';
+}
+
 /** Runs one switch operation at a time and keeps the UI in sync afterwards. */
 async function exclusive(fn) {
     if (busy) {
@@ -425,8 +461,7 @@ function preflightStart() {
     if (c.groupId) return t('err_group');
     if (!currentCharacter() || !c.getCurrentChatId()) return t('err_nochar');
     if (getState()) return t('err_already');
-    if (isGenerating()) return t('err_busy');
-    return '';
+    return busyReason();
 }
 
 async function openStartDialog() {
@@ -534,7 +569,7 @@ async function startCardMode(soloIndex) {
     if (!origin || !solo || !originFile) return toastr.warning(t('err_nochar'));
 
     await c.saveChat();
-    const messages = withAvatar(structuredClone(ctx().chat), origin.avatar);
+    const messages = withAvatar(stripBgMarkers(structuredClone(ctx().chat)), origin.avatar);
     const meta = copyMetadataFrom(ctx().chatMetadata);
     meta[MODULE_NAME] = {
         mode: 'card',
@@ -578,7 +613,8 @@ async function openBackDialog() {
     const c = ctx();
     const st = getState();
     if (!st) return toastr.info(t('err_notsolo'));
-    if (isGenerating()) return toastr.warning(t('err_busy'));
+    const wait = busyReason();
+    if (wait) return toastr.warning(wait);
 
     const isCard = st.mode === 'card';
     const name = isCard ? st.soloName : st.name;
@@ -674,7 +710,7 @@ async function backFromCard(st, merge) {
     let merged = 0;
     if (merge) {
         const base = Math.max(0, Number(st.baseLength) || 0);
-        const newMessages = withAvatar(structuredClone(ctx().chat.slice(base)), st.soloAvatar ?? currentCharacter()?.avatar);
+        const newMessages = withAvatar(stripBgMarkers(structuredClone(ctx().chat.slice(base))), st.soloAvatar ?? currentCharacter()?.avatar);
         if (newMessages.length > 0) {
             if (file.messages.length !== Number(st.originLength)) toastr.warning(t('warn_origin_changed'));
             const all = [...file.messages, ...newMessages];
@@ -720,7 +756,7 @@ async function backFromFocusSplit(st) {
         const meta = copyMetadataFrom(ctx().chatMetadata);
         meta[MODULE_NAME] = { ...st, archivedFrom: c.getCurrentChatId() };
         archiveName = newFileName(me.name, `1on1 ${st.name}`);
-        await saveChatFile(me, archiveName, makeHeader(meta), structuredClone(chat));
+        await saveChatFile(me, archiveName, makeHeader(meta), stripBgMarkers(structuredClone(chat)));
 
         chat.splice(start);
     }
